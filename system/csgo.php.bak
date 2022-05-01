@@ -1,0 +1,170 @@
+<?php
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+require_once '../config.php';
+
+// Random Types:
+// - none = ไม่ได้อะไรเลย
+// - credit|1|15 = ได้รับเครดิต 1 - 15
+// - stock|1 = ได้รับรางวัล ID 1
+
+function dd_rand($array) {
+    $rand = (float)rand() / (float)getrandmax();
+    $result = array_keys($array, max($array))[0];
+    foreach ($array as $value => $percent) {
+        $percent = $percent / 50;
+        if ($rand < $percent) {
+            $result = $value;
+            break;
+        }
+        $rand -= $percent;
+    }
+    return $result;
+}
+
+function dd_return($status, $message, $index = null) {
+    $json = ['message' => $message];
+    if ($status) {
+        http_response_code(200);
+        if (isset($index)) $json['index'] = $index;
+        die(json_encode($json));
+    }else{
+        http_response_code(400);
+        die(json_encode($json));
+    }
+}
+
+
+//////////////////////////////////////////////////////////////////////////
+
+header('Content-Type: application/json; charset=utf-8;');
+
+// is POST
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // is logged-in user
+  if (isset($_SESSION['id'])) {
+    $q_check = dd_q('SELECT * FROM user_tb WHERE u_id = ?', [$_SESSION['id']]);
+    if ($q_check->fetchAll() >= 1) {
+
+        $q = dd_q('SELECT u_point FROM user_tb WHERE u_id = ? LIMIT 1', [$_SESSION['id']]);
+        if ($q !== false) {
+            if ($q->fetch() < 10) {
+                $left = 10 - $q->fetch();
+                dd_return(false, "ยอดเงินคงเหลือไม่เพียงพอ");
+            }
+        }else{
+            dd_return(false, 'เกิดข้อผิดพลาดในระบบ โปรดลองใหม่อีกครั้งในภายหลัง');
+        }
+
+        // ดึงรายการรางวัล
+        $rewards = array();
+        $q = dd_q('SELECT * FROM csgo_chance WHERE chance > 0');
+        if ($q !== false) {
+            $chances = $q->fetchAll();
+            foreach($chances as $c) {
+                $rewards["{$c['rw_type']}"] = (int)$c['chance'];
+            }
+        }
+
+        $qs = dd_q('SELECT * FROM user_tb WHERE u_id = ? LIMIT 1', [$_SESSION['id']]);
+        $row_credit_qs = $qs->fetch(PDO::FETCH_ASSOC);
+        if ($row_credit_qs['u_point'] >= 10) {
+
+              // พบ % หรือไม่
+              if (count($rewards) > 0) {
+                  // หัก credit และ เริ่มการสุ่ม...
+                  $q = dd_q('UPDATE user_tb SET u_point = u_point - ?,u_youbuy = u_youbuy + ? WHERE u_id = ? LIMIT 1', [10, 10,$_SESSION['id']]);
+                  if ($q !== false) {
+
+                      // สุ่ม พร้อม เปอร์เซ็นต์
+                      $result = dd_rand($rewards);
+
+                      // เป็นตัวบอก ID ในฝั่ง Javascript เช่น stock|1 จะแสดงเป็น stock_1
+                      $result_parsed = str_replace('|', '_', $result);
+
+                      if ($result == 'none') {
+                          // history
+                          $q = dd_q('INSERT INTO random_history (user_id, game_name, item_name, item_detail, date) VALUES (?, ?, ?, ?, ?)', [$_SESSION['id'], 'csgo', 'ไม่ได้รางวัล', "-", date('Y-m-d H:i:s')]);
+                          $q = dd_q('INSERT INTO random_day (price, userid, date) VALUES (?, ?, ?)', [10, $_SESSION['id'], date('Y-m-d')]);
+
+                          // เกลือ
+
+                          dd_return(true, 'คุณไม่ได้รับอะไรเลย.. ไว้ลองกันใหม่', $result_parsed);
+
+                      }elseif (strpos($result, '|') !== false){
+
+                          $result = explode('|', $result);
+                          if ($result[0] == 'credit') {
+                              // random min-max
+                              $random = mt_rand($result[1], $result[2]);
+                              $q = dd_q('UPDATE user_tb SET u_point = u_point + ? WHERE u_id = ? LIMIT 1', [$random, $_SESSION['id']]);
+                              // history
+                              $q = dd_q('INSERT INTO random_history (user_id, game_name, item_name, item_detail, date) VALUES (?, ?, ?, ?, ?)', [$_SESSION['id'], 'csgo', 'Point', "ได้รับเครดิต +{$random}", date('Y-m-d H:i:s')]);
+                              // return พร้อมแจ้ง Index
+                              $random_his = ($random - $random - $random) + 10;
+                              $q = dd_q('INSERT INTO random_day (price, userid, date) VALUES (?, ?, ?)', [$random_his, $_SESSION['id'], date('Y-m-d')]);
+
+                              dd_return(true, "คุณได้รับ {$random} Point!", $result_parsed);
+                          }elseif ($result[0] == 'stock'){
+                              // stock type
+                              $stock_id = $result[1];
+                              // get name
+                              $stock_name = null;
+                              $q = dd_q('SELECT name FROM random_rewards WHERE id = ? LIMIT 1', [$stock_id]);
+                              if ($q !== false) {
+                                  $stock_name = @$q->fetch()[0];
+                              }
+                              $q = dd_q('SELECT price FROM random_rewards WHERE id = ? LIMIT 1', [$stock_id]);
+                              if ($q !== false) {
+                                  $stock_price = @$q->fetch()[0];
+                              }
+                              // select
+                              $q = dd_q('SELECT * FROM random_stock WHERE type = ? AND owner_id = 0 LIMIT 1', [$stock_id]);
+                              if ($q !== false) {
+                                  if ($q->rowCount() > 0) {
+                                      // ดึงข้อมูลทั้งหมด
+                                      $result = $q->fetch(PDO::FETCH_ASSOC);
+
+                                      // Set Owner
+                                      $q = dd_q('UPDATE random_stock SET owner_id = ? WHERE id = ? LIMIT 1', [$_SESSION['id'], $result['id']]);
+
+                                      // มีชื่อสินค้ามั้ย? ถ้ามี เอาชื่อสินค้าขึ้น
+                                      $message = (isset($stock_name)) ? $stock_name : 'บัตรเติมเงินการีน่าเชลล์';
+
+                                      // history
+                                      $q = dd_q('INSERT INTO random_history (user_id, game_name, item_name, item_detail, date) VALUES (?, ?, ?, ?, ?)', [$_SESSION['id'], 'csgo', $message, "โค้ด: {$result['contents']}", date('Y-m-d H:i:s')]);
+                                      $stock_price = $stock_price + 10;
+                                      $q = dd_q('INSERT INTO random_day (price, userid, date) VALUES (?, ?, ?)', [$stock_price, $_SESSION['id'], date('Y-m-d')]);
+
+                                      dd_return(true, "คุณได้รับ {$message}!", $result_parsed);
+                                  }else{
+                                      // history
+                                      $q = dd_q('INSERT INTO random_history (user_id, game_name, item_name, item_detail, date) VALUES (?, ?, ?, ?, ?)', [$_SESSION['id'], 'csgo', 'ไม่ได้รางวัล', "-", date('Y-m-d H:i:s')]);
+                                      $q = dd_q('INSERT INTO random_day (price, userid, date) VALUES (?, ?, ?)', [10, $_SESSION['id'], date('Y-m-d')]);
+
+                                      // ของหมด
+
+                                        dd_return(true, 'คุณไม่ได้รับอะไรเลย.. ไว้ลองกันใหม่', 'none');
+
+                                  }
+                              }
+                          }
+                      }
+
+                  }
+                  dd_return(false, 'เกิดข้อผิดพลาดในระบบ โปรดลองใหม่อีกครั้งในภายหลัง');
+              }
+              dd_return(false, 'ขณะนี้ระบบสุ่มยังไม่พร้อมใช้งาน');
+      }
+      dd_return(false, 'ยอดเงินคงเหลือไม่เพียงพอ');
+    }
+    dd_return(false, 'ไม่พบชื่อผู้ใช้งาน');
+  }
+  dd_return(false, 'โปรดเข้าสู่ระบบก่อนทำการสุ่ม');
+}
+dd_return(false, "Method '{$_SERVER['REQUEST_METHOD']}' not allowed!");
+
+//////////////////////////////////////////////////////////////////////////
+
+?>
