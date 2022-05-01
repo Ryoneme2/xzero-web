@@ -4,7 +4,7 @@ session_start();
 date_default_timezone_set("Asia/Bangkok");
 
 function base_url() {
-  return (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://$_SERVER[HTTP_HOST]/web2"."";
+  return (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://$_SERVER[HTTP_HOST]"."";
 }
 $links_re = base_url();
 require_once __dir__ . "/asset/php-graph-sdk-5.x/src/Facebook/autoload.php";
